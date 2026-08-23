@@ -28,6 +28,38 @@ from OCC.Core.TopoDS import TopoDS_Shape
 from OCC.Core.AIS import AIS_Shape
 from OCC.Core.TopAbs import TopAbs_EDGE
 
+# Component builder import copy
+import logging
+
+from osdagbridge.core.bridge_components.foundation.pile.builder import build_piles
+from osdagbridge.core.bridge_components.foundation.pile_cap.builder import build_pile_cap
+from osdagbridge.core.bridge_components.sub_structure.pier.builder import build_pier
+from osdagbridge.core.bridge_components.sub_structure.pier_cap.builder import build_pier_cap
+
+def generate_substructure(x_center, y_center, deck_width, ground_z=-5000.0):
+    pile_top_z = ground_z + 5000.0            # = pile_length; piles' top face
+    result = {}
+
+    piles = build_piles(x_center=x_center, y_center=y_center, z_top=pile_top_z)
+    result.update(piles)
+
+    pile_cap = build_pile_cap(x_center=x_center, y_center=y_center, z_top=pile_top_z)
+    result.update(pile_cap)
+    pile_cap_top_z = pile_top_z + 600.0        # = pile_cap_depth
+
+    pier = build_pier(x_center=x_center, y_center=y_center, z_base=pile_cap_top_z)
+    result.update(pier)
+    pier_top_z = pile_cap_top_z + 3000.0       # = pier_height
+
+    pier_cap = build_pier_cap(
+        x_center=x_center, y_center=y_center,
+        z_base=pier_top_z, pier_cap_top_width=deck_width,
+        pier_cap_length=3000.0
+    )
+    result.update(pier_cap)
+
+    return result
+
 # Component builder imports
 from osdagbridge.core.bridge_components.super_structure.plate_girder.builder import (
     build_plate_girder_geometry, GirderSegment
@@ -908,10 +940,44 @@ class PlateGirderCADGenerator:
         
         supports = supports_tri + supports_cyl
 
-        # RETURN ALL GENERATED COMPONENTS
+        # STEP 12: BUILD SUBSTRUCTURE
+        sub_pier_concrete  = []
+        sub_rebar_long     = []
+        sub_rebar_trans    = []
+        sub_pier_cap       = []
+        sub_pile_cap       = []
+        sub_pile_cap_rebar = []
+        sub_piles          = []
+        sub_pile_rebar     = []
+        sub_pier_cap_rebar = []
+
+        for pier_x in [0.0, self.span_length_L]:
+            pier_y      = 0.0
+            total_deck_w = deck_out["total_deck_width"]
+            
+            bearing_bottom_z = -(self.girder_section_d / 2.0) - self.girder_section_tf_b - 50.0
+            ground_z = bearing_bottom_z - 9200.0
+            
+            sub = generate_substructure(
+                x_center=pier_x,
+                y_center=pier_y,
+                deck_width=total_deck_w,
+                ground_z=ground_z
+            )
+            
+            sub_pier_concrete.extend(sub.get("pier_concrete",  []))
+            sub_rebar_long.extend(sub.get("rebar_long",     []))
+            sub_rebar_trans.extend(sub.get("rebar_trans",    []))
+            sub_pier_cap.extend(sub.get("pier_cap_concrete", []))
+            sub_pier_cap_rebar.extend(sub.get("pier_cap_rebar", []))
+            sub_pile_cap.extend(sub.get("pile_cap_concrete", []))
+            sub_pile_cap_rebar.extend(sub.get("pile_cap_rebar", []))
+            sub_piles.extend(sub.get("piles",         []))
+            sub_pile_rebar.extend(sub.get("pile_rebar", []))
+
+        print(f"[DEBUG] sub_pier_cap count: {len(sub_pier_cap)}")
         
-        return {
-            # Girder components
+        cad_data = {
             "girders": girders,
             "girder_web": girder_web,
             "girder_flanges": girder_flanges,
@@ -956,8 +1022,24 @@ class PlateGirderCADGenerator:
             "median_w_beams": median_w_beams,
             
             # Railings
-            "railings": railings
+            "railings": railings,
+
+            # ── SUBSTRUCTURE ──────────────────────────────────────────────────
+            "pier":              sub_pier_concrete,
+            "pier_cap":          sub_pier_cap,
+            "pile_cap":          sub_pile_cap,
+            "pile_cap_rebar":    sub_pile_cap_rebar,
+            "pier_cap_rebar":    sub_pier_cap_rebar,
+            "piles":             sub_piles,
+            "pile_rebar":        sub_pile_rebar,
+            "rebar_longitudinal": sub_rebar_long,
+            "rebar_transverse":   sub_rebar_trans,
         }
+
+        print(f"[DEBUG] pier_cap dict entry in final output: {len(cad_data.get('pier_cap', []))}")
+        
+        self.model_data = cad_data
+        return cad_data       
 
     def create3Dcad(self):
         """

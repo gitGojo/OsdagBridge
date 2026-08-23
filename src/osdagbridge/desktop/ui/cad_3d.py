@@ -265,6 +265,72 @@ class CAD3DWindow(QWidget):
             self.viewer.safety.teardown_model()
             self._render_model_body()
 
+    def display_substructure(self, display, context, substructure_dict):
+        from OCC.Core.Quantity import Quantity_Color, Quantity_NOC_GRAY80, Quantity_TOC_RGB
+        from OCC.Core.AIS import AIS_Shape
+
+        CONCRETE_COLOR = Quantity_Color(Quantity_NOC_GRAY80)
+        CONCRETE_TRANSPARENCY = 0.65   # 0.65 transparent -> 0.35 opacity
+        REBAR_COLOR = Quantity_Color(0.65, 0.35, 0.30, Quantity_TOC_RGB) # Reddish-brown / copper
+        REBAR_TRANSPARENCY = 0.0
+
+        # cad_generator key -> model_ais_objects key (must match component_map in update_component_visibility)
+        CONCRETE_MAP = {
+            "pile_cap": "Pile Cap",
+            "pier":     "Pier",
+            "pier_cap": "Pier Cap",
+            "piles":    "Piles",
+        }
+        REBAR_MAP = {
+            "pile_rebar":         "Pile Rebar",
+            "rebar_longitudinal": "Rebar Longitudinal",
+            "rebar_transverse":   "Rebar Transverse",
+            "pile_cap_rebar":     "Pile Cap Rebar",
+            "pier_cap_rebar":     "Pier Cap Rebar",
+        }
+
+        def _display_group(shape_key, model_key, color, transparency):
+            shapes = substructure_dict.get(shape_key, [])
+            if shape_key in ["pier_cap", "pier"]:
+                print(f"[DEBUG] displaying {shape_key} shape, count={len(shapes)}")
+                if shapes:
+                    try:
+                        from OCC.Core.BRepBndLib import brepbndlib_Add
+                        from OCC.Core.Bnd import Bnd_Box
+                        box = Bnd_Box()
+                        brepbndlib_Add(shapes[0], box)
+                        xmin, ymin, zmin, xmax, ymax, zmax = box.Get()
+                        print(f"[DEBUG] displaying {shape_key} shape, bbox=({xmax-xmin:.1f}, {ymax-ymin:.1f}, {zmax-zmin:.1f})")
+                        print(f"[DEBUG] {shape_key} WORLD coords: x=({xmin:.1f},{xmax:.1f}) y=({ymin:.1f},{ymax:.1f}) z=({zmin:.1f},{zmax:.1f})")
+                    except Exception as e:
+                        print(f"[DEBUG] displaying {shape_key} shape, bbox error: {e}")
+            if not shapes:
+                return
+            ais_list = []
+            for shape in shapes:
+                try:
+                    ais = AIS_Shape(shape)
+                    ais.SetColor(color)
+                    ais.SetTransparency(transparency)
+                    
+                    if hasattr(ais, "Attributes") and hasattr(ais.Attributes(), "SetFaceBoundaryDraw"):
+                        ais.Attributes().SetFaceBoundaryDraw(False)
+                        
+                    context.Display(ais, False)           # display first
+                    context.SetDisplayMode(ais, 1, False) # then force Shaded (1)
+                    context.Activate(ais, 0)
+                    ais_list.append(ais)
+                except Exception as e:
+                    print(f"[DEBUG] ERROR in displaying {shape_key}: {e}")
+            self.viewer.model_ais_objects[model_key] = ais_list
+
+        for src_key, model_key in CONCRETE_MAP.items():
+            _display_group(src_key, model_key, CONCRETE_COLOR, CONCRETE_TRANSPARENCY)
+
+        for src_key, model_key in REBAR_MAP.items():
+            _display_group(src_key, model_key, REBAR_COLOR, REBAR_TRANSPARENCY)
+
+
     def _render_model_body(self):
         # Build and display the model AIS — must run inside safety.critical_section() (see load_bridge).
         params = self.design_params
@@ -275,9 +341,9 @@ class CAD3DWindow(QWidget):
         display.EraseAll()
 
         # COLORS
-        WEB_COLOR = Quantity_Color(47/255.0, 47/255.0, 35/255.0, Quantity_TOC_RGB)
-        FLANGE_COLOR = Quantity_Color(134/255.0, 134/255.0, 100/255.0, Quantity_TOC_RGB)
-        STIFFENER_COLOR = Quantity_Color(72/255, 72/255, 54/255, Quantity_TOC_RGB)
+        WEB_COLOR = Quantity_Color(0.35, 0.35, 0.35, Quantity_TOC_RGB)
+        FLANGE_COLOR = Quantity_Color(0.40, 0.40, 0.40, Quantity_TOC_RGB)
+        STIFFENER_COLOR = Quantity_Color(0.45, 0.45, 0.45, Quantity_TOC_RGB)
         DECK_COLOR = Quantity_Color(100/255, 100/255, 100/255, Quantity_TOC_RGB)
         BARRIER_COLOR = Quantity_Color(40/255, 40/255, 40/255, Quantity_TOC_RGB)  #Quantity_Color(120/255, 120/255, 120/255, Quantity_TOC_RGB)
         BRACING_COLOR = Quantity_Color(60/255, 60/255, 60/255, Quantity_TOC_RGB)
@@ -308,6 +374,9 @@ class CAD3DWindow(QWidget):
                 if line_width is not None:
                     ais.SetWidth(line_width)
                     context.RecomputePrsOnly(ais, False)
+
+                # Force shaded mode (1 = AIS_Shaded)
+                context.SetDisplayMode(ais, 1, False)
 
                 if selectable:
                     context.Activate(ais, 0)   # REQUIRED for hover
@@ -414,7 +483,8 @@ class CAD3DWindow(QWidget):
             cad_data.get("deck_slab"),
             "Deck",
             f"Deck Slab\nThickness: {params.deck_thickness:.2f} mm\nCarriageway Width: {params.carriageway_width:.2f} mm\nConcrete Grade: {params.concrete_grade}\nFootpath: {params.footpath_config}",
-            DECK_COLOR
+            DECK_COLOR,
+            transparency=0.45   # semi-transparent so girders are visible underneath (matches Figure 5)
         )
         # DECK TEXTURES (DISPLAY ONLY, NO HOVER)
         self.viewer.deck_texture_ais = []
@@ -466,6 +536,9 @@ class CAD3DWindow(QWidget):
             f"Railing\nType: {params.railing_type.upper()}\nRails: {params.rail_count}\nWidth: {params.railing_width:.2f} mm",
             BARRIER_COLOR
         )
+
+        # ── SUBSTRUCTURE ──────────────────────────────────────────────────────
+        self.display_substructure(display, context, cad_data)
 
         # Nodes and grillage overlays
         node_positions = self._render_nodes()
@@ -708,6 +781,11 @@ class CAD3DWindow(QWidget):
 
         # Map checkbox keys → internal model_ais_objects keys
         component_map = {
+            "Bridge":        ["Girder Web", "Girder Top Flange", "Girder Bottom Flange",
+                              "Intermediate Stiffener", "Bearing Stiffener", "Longitudinal Stiffener",
+                              "Shear Stud", "Support Vertical", "Support Transverse", "Support Longitudinal",
+                              "Deck", "Cross Bracing", "Crash Barrier", "Crash Barrier W-Beam",
+                              "Median", "Median W-Beam", "Railing"],
             "Girder":        ["Girder Web", "Girder Top Flange", "Girder Bottom Flange",
                               "Intermediate Stiffener", "Bearing Stiffener", "Longitudinal Stiffener",
                               "Shear Stud", "Support Vertical", "Support Transverse", "Support Longitudinal"],
@@ -716,6 +794,9 @@ class CAD3DWindow(QWidget):
             "Crash Barrier": ["Crash Barrier", "Crash Barrier W-Beam"],
             "Median":        ["Median", "Median W-Beam"],
             "Railing":       ["Railing"],
+            "Substructure":  ["Pier", "Pier Cap", "Pile Cap", "Piles",
+                              "Rebar Longitudinal", "Rebar Transverse", "Pile Cap Rebar",
+                              "Pier Cap Rebar", "Pile Rebar"],
             "Grillage":      ["Grillage"],
             "Node":          ["Node"],
         }
@@ -751,6 +832,7 @@ class CAD3DWindow(QWidget):
                 try:
                     if should_show:
                         context.Display(ais, False)
+                        context.SetDisplayMode(ais, 1, False)  # FORCE Shaded mode (1) to prevent fallback to wireframe
                     else:
                         context.Erase(ais, False)
                 except Exception:
@@ -762,6 +844,7 @@ class CAD3DWindow(QWidget):
             try:
                 if show_deck:
                     context.Display(ais, False)
+                    context.SetDisplayMode(ais, 3, False) # Textures must use mode 3
                 else:
                     context.Erase(ais, False)
             except Exception:
@@ -1202,13 +1285,14 @@ class BridgeComponentCheckbox(QWidget):
     # key=None  → "Model" pseudo-checkbox (selects all base components)
     # key in OVERLAY_KEYS → independent toggle, not affected by Model
     COMPONENTS = [
-        ("Bridge",         None),
+        ("Bridge",        "Bridge"),
         ("Girder",        "Girder"),
         ("Deck",          "Deck"),
         ("Cross Bracing", "Cross Bracing"),
         ("Crash Barrier", "Crash Barrier"),
         ("Median",        "Median"),
         ("Railing",       "Railing"),
+        ("Substructure",  "Substructure"),
         ("Grillage view", "Grillage"),
         ("Node",          "Node"),
         ("Node Numbers",  "NodeNumbers"),
@@ -1253,8 +1337,10 @@ class BridgeComponentCheckbox(QWidget):
 
         layout.addStretch()
 
-        # Default: Model checked; overlays off
-        self._checkboxes[0].setChecked(True)
+        # Default: Bridge and Substructure checked; overlays off
+        for cb in self._checkboxes:
+            if cb.text() in ("Bridge", "Substructure"):
+                cb.setChecked(True)
 
     # ── Maintain a back-compat alias ──────────────────────────────────────────
     @property
@@ -1268,76 +1354,29 @@ class BridgeComponentCheckbox(QWidget):
     # ── Click logic ───────────────────────────────────────────────────────────
 
     def _on_click(self, key, cb, checked):
-        model_cb = self._checkboxes[0]
-
-        if key is None:                        # "Model" clicked
-            if checked:
-                # Uncheck individual base components, keep overlays as-is
-                for c, (_, k) in zip(self._checkboxes[1:], self.COMPONENTS[1:]):
-                    if k and k not in self.OVERLAY_KEYS:
-                        c.blockSignals(True)
-                        c.setChecked(False)
-                        c.blockSignals(False)
-            else:
-                if not self._any_base_checked():
-                    cb.blockSignals(True)
-                    cb.setChecked(True)
-                    cb.blockSignals(False)
-            self._apply()
-            return
-
-        if key in self.OVERLAY_KEYS:
-            self._apply()
-            return
-
-        # Base component clicked
-        if checked:
-            model_cb.blockSignals(True)
-            model_cb.setChecked(False)
-            model_cb.blockSignals(False)
-        else:
-            if not self._any_base_checked():
-                model_cb.blockSignals(True)
-                model_cb.setChecked(True)
-                model_cb.blockSignals(False)
         self._apply()
 
     def _any_base_checked(self) -> bool:
         return any(
             cb.isChecked()
-            for cb, (_, k) in zip(self._checkboxes[1:], self.COMPONENTS[1:])
+            for cb, (_, k) in zip(self._checkboxes, self.COMPONENTS)
             if k and k not in self.OVERLAY_KEYS
         )
 
     def _collect(self) -> list:
-        model_checked = self._checkboxes[0].isChecked()
         result = []
-        for cb, (_, key) in zip(self._checkboxes[1:], self.COMPONENTS[1:]):
+        for cb, (_, key) in zip(self._checkboxes, self.COMPONENTS):
             if not key:
                 continue
             if key in self._unavailable:
                 continue
-            if key in self.OVERLAY_KEYS:
-                if cb.isChecked():
-                    result.append(key)
-            elif model_checked or cb.isChecked():
+            if cb.isChecked():
                 result.append(key)
         return result
 
     def _apply(self):
         selected = self._collect()
-        if selected:
-            self._cad.update_component_visibility(selected)
-            return
-        # Nothing selected → fall back to Model
-        self._checkboxes[0].blockSignals(True)
-        self._checkboxes[0].setChecked(True)
-        self._checkboxes[0].blockSignals(False)
-        selected = self._collect()
-        if selected:
-            self._cad.update_component_visibility(selected)
-        else:
-            self._cad.show_full_model()
+        self._cad.update_component_visibility(selected)
 
     def set_available_components(self, available_keys):
         """Show/hide the OPTIONAL_KEYS checkboxes (Railing, Median) based on

@@ -125,8 +125,271 @@ class PlateGirderIFCExtractor:
             "cross_bracings": self._extract_cross_bracings(n_girders, spacing),
             "deck_slab": self._extract_deck_slab(total_width),
             "crash_barriers": self._extract_safety_components(total_width, actual_base_width, actual_railing_width),
-            "supports": self._extract_supports(n_girders, spacing)
+            "supports": self._extract_supports(n_girders, spacing),
+            # Substructure (pier, pier cap, pile cap, piles, rebar)
+            "substructure": self._extract_substructure(total_width),
         }
+
+    def _extract_substructure(self, total_deck_width=None):
+        """
+        Extract substructure component parameters for IFC generation.
+
+        Uses _substructure_params stored by cad_generator.generate() if the
+        cad object is a PlateGirderCADGenerator instance (has model_data).
+        Falls back to builder-module defaults otherwise.
+
+        Returns a dict of lists of ExtractedObject items — one list per
+        component type. Each item carries the geometry parameters needed
+        to build IFC swept-solid geometry analytically (no tessellation).
+        """
+        import math
+
+        # Pull params from cad_generator.model_data if available, else defaults
+        cad = self.cad
+        params = {}
+        if hasattr(cad, "model_data") and isinstance(cad.model_data, dict):
+            params = cad.model_data.get("_substructure_params", {})
+
+        # Deck geometry
+        deck_top_z  = params.get("deck_top_z",  getattr(cad, "girder_section_d", 1500) / 2 + getattr(cad, "girder_section_tf", 20) + getattr(cad, "deck_thickness", 200))
+        span_L      = getattr(cad, "span_length_L", 20000.0)
+        pier_x      = params.get("pier_x",      span_L / 2.0)
+        pier_y      = params.get("pier_y",      0.0)
+
+        # Substructure dimensions (from params or builder defaults)
+        from osdagbridge.core.bridge_components.sub_structure.pier.builder import (
+            PIER_DIAMETER, PIER_HEIGHT,
+            REBAR_MAIN_DIAMETER, REBAR_SPACING_LONGITUDINAL,
+            REBAR_TRANSVERSE_DIAMETER, REBAR_SPACING_TRANSVERSE, REBAR_COVER,
+        )
+        from osdagbridge.core.bridge_components.sub_structure.pier_cap.builder import (
+            PIER_CAP_TOP_WIDTH, PIER_CAP_BOTTOM_WIDTH, PIER_CAP_DEPTH,
+        )
+        from osdagbridge.core.bridge_components.foundation.pile_cap.builder import (
+            PILE_CAP_LENGTH, PILE_CAP_WIDTH, PILE_CAP_DEPTH,
+        )
+        from osdagbridge.core.bridge_components.foundation.pile.builder import (
+            N_PILES_PER_CAP, PILE_DIAMETER, PILE_LENGTH, PILE_SPACING,
+        )
+
+        p_dia   = params.get("pier_diameter",        PIER_DIAMETER)
+        p_h     = params.get("pier_height",           PIER_HEIGHT)
+        pc_tw   = params.get("pier_cap_top_width",    PIER_CAP_TOP_WIDTH)
+        pc_bw   = params.get("pier_cap_bottom_width", PIER_CAP_BOTTOM_WIDTH)
+        pc_d    = params.get("pier_cap_depth",        PIER_CAP_DEPTH)
+        pc_l    = params.get("pier_cap_length",       total_deck_width or PIER_CAP_TOP_WIDTH)
+        plc_l   = params.get("pile_cap_length",       PILE_CAP_LENGTH)
+        plc_w   = params.get("pile_cap_width",        PILE_CAP_WIDTH)
+        plc_d   = params.get("pile_cap_depth",        PILE_CAP_DEPTH)
+        pile_d  = params.get("pile_diameter",         PILE_DIAMETER)
+        pile_l  = params.get("pile_length",           PILE_LENGTH)
+        pile_sp = params.get("pile_spacing",          PILE_SPACING)
+        n_piles = params.get("n_piles",               N_PILES_PER_CAP)
+        rb_d    = params.get("rebar_main_diameter",   REBAR_MAIN_DIAMETER)
+        rb_td   = params.get("rebar_transverse_diameter", REBAR_TRANSVERSE_DIAMETER)
+        rb_cov  = params.get("rebar_cover",           REBAR_COVER)
+        rb_sp_l = params.get("rebar_spacing_long",    REBAR_SPACING_LONGITUDINAL)
+        rb_sp_t = params.get("rebar_spacing_trans",   REBAR_SPACING_TRANSVERSE)
+
+        # Z stack (top-down)
+        pier_cap_z_bot = deck_top_z - pc_d
+        pier_top_z     = pier_cap_z_bot
+        pile_cap_z_top = pier_top_z  - p_h
+        pile_z_top     = pile_cap_z_top - plc_d
+
+        pier_cap_items = []
+        pier_items = []
+        pile_cap_items = []
+        pile_items = []
+        rebar_long_items = []
+        hoop_items = []
+        pile_cap_rebar_items = []
+
+        for pier_idx, pier_x in enumerate([-span_L / 2.0, span_L / 2.0]):
+            pier_id = f"G{pier_idx+1}_"
+            # ── Pier cap ─────────────────────────────────────────────────────────
+            # Volume: trapezoidal cross-section × length
+            # Area of trapezoid = 0.5*(top+bot)*depth  (mm²)
+            pc_area_mm2 = 0.5 * (pc_tw + pc_bw) * pc_d
+            pc_vol_m3   = (pc_area_mm2 * pc_l) / 1e9
+
+            pier_cap_items.append(ExtractedObject(
+                "SubstructurePierCap",
+                ifc_name        = f"PierCap_{pier_idx+1}",
+                component_role  = "Pier Cap",
+                material        = "Concrete",
+                concrete_grade  = "M30",
+                # Geometry for IFC extrusion (trapezoidal profile extruded along Y)
+                x_center        = pier_x,
+                y_center        = pier_y,
+                z_bottom        = pier_cap_z_bot,
+                top_width       = pc_tw,
+                bottom_width    = pc_bw,
+                depth           = pc_d,
+                length          = pc_l,
+                volume_m3       = pc_vol_m3,
+            ))
+
+            # ── Pier column ───────────────────────────────────────────────────────
+            pier_vol_m3 = math.pi * (p_dia / 2 / 1000) ** 2 * (p_h / 1000)
+
+            pier_items.append(ExtractedObject(
+                "SubstructurePier",
+                ifc_name        = f"Pier_{pier_idx+1}",
+                component_role  = "Pier Column",
+                material        = "Concrete",
+                concrete_grade  = "M30",
+                x_center        = pier_x,
+                y_center        = pier_y,
+                z_bottom        = pier_top_z - p_h,   # pier bottom
+                diameter        = p_dia,
+                height          = p_h,
+                volume_m3       = pier_vol_m3,
+            ))
+
+            # ── Pile cap ──────────────────────────────────────────────────────────
+            plc_vol_m3 = (plc_l * plc_w * plc_d) / 1e9
+
+            pile_cap_items.append(ExtractedObject(
+                "SubstructurePileCap",
+                ifc_name        = f"PileCap_{pier_idx+1}",
+                component_role  = "Pile Cap",
+                material        = "Concrete",
+                concrete_grade  = "M30",
+                x_center        = pier_x,
+                y_center        = pier_y,
+                z_top           = pile_cap_z_top,
+                length          = plc_l,
+                width           = plc_w,
+                depth           = plc_d,
+                volume_m3       = plc_vol_m3,
+            ))
+
+            # ── Piles (2×2 grid) ──────────────────────────────────────────────────
+            pile_vol_m3_each = math.pi * (pile_d / 2 / 1000) ** 2 * (pile_l / 1000)
+            half_sp = pile_sp / 2.0
+            for idx, (sx, sy) in enumerate([(-1,-1),(-1,+1),(+1,-1),(+1,+1)]):
+                pile_items.append(ExtractedObject(
+                    "SubstructurePile",
+                    ifc_name        = f"Pile_{pier_id}{idx+1}",
+                    component_role  = "Pile",
+                    material        = "Concrete",
+                    concrete_grade  = "M30",
+                    x_center        = pier_x + sx * half_sp,
+                    y_center        = pier_y + sy * half_sp,
+                    z_top           = pile_z_top,
+                    diameter        = pile_d,
+                    length          = pile_l,
+                    volume_m3       = pile_vol_m3_each,
+                ))
+
+            # ── Longitudinal rebar in pier ────────────────────────────────────────
+            cage_r = p_dia / 2.0 - rb_cov - rb_d / 2.0
+            cage_circ = 2.0 * math.pi * cage_r
+            n_long = params.get("n_rebar_long", max(6, int(cage_circ / rb_sp_l)))
+            bar_len_m = p_h / 1000.0
+            bar_vol_m3 = math.pi * (rb_d / 2 / 1000) ** 2 * bar_len_m
+
+            for i in range(n_long):
+                angle = 2.0 * math.pi * i / n_long
+                rebar_long_items.append(ExtractedObject(
+                    "SubstructureRebar",
+                    ifc_name        = f"Pier_LongRebar_{pier_id}{i+1}",
+                    component_role  = "Longitudinal Rebar",
+                    material        = "Steel",
+                    steel_grade     = "Fe415",
+                    x_center        = pier_x + cage_r * math.cos(angle),
+                    y_center        = pier_y + cage_r * math.sin(angle),
+                    z_bottom        = pier_top_z - p_h,
+                    diameter        = rb_d,
+                    length_mm       = p_h,
+                    length_m        = bar_len_m,
+                    volume_m3       = bar_vol_m3,
+                ))
+
+            # ── Transverse hoops in pier ──────────────────────────────────────────
+            z_start_h = (pier_top_z - p_h) + rb_cov + rb_td
+            z_end_h   = pier_top_z         - rb_cov - rb_td
+            z_h = z_start_h
+            hoop_idx = 0
+            hoop_r_outer = cage_r + rb_td
+            hoop_r_inner = max(1.0, cage_r - rb_td)
+            hoop_circ_m  = 2.0 * math.pi * cage_r / 1000.0
+            hoop_vol_m3  = math.pi * ((hoop_r_outer/1000)**2 - (hoop_r_inner/1000)**2) * (rb_td / 1000)
+
+            while z_h <= z_end_h + 1e-3:
+                hoop_items.append(ExtractedObject(
+                    "SubstructureRebar",
+                    ifc_name        = f"Pier_Hoop_{pier_id}{hoop_idx+1}",
+                    component_role  = "Transverse Hoop",
+                    material        = "Steel",
+                    steel_grade     = "Fe415",
+                    x_center        = pier_x,
+                    y_center        = pier_y,
+                    z_center        = z_h,
+                    diameter        = rb_td,
+                    length_mm       = hoop_circ_m * 1000,  # circumference
+                    length_m        = hoop_circ_m,
+                    volume_m3       = hoop_vol_m3,
+                ))
+                z_h += rb_sp_t
+                hoop_idx += 1
+
+            # ── Pile cap rebar mesh ───────────────────────────────────────────────
+            bar_r = rb_d / 2.0
+            bar_lx = plc_l - 2.0 * rb_cov   # bar length in X
+            bar_ly = plc_w - 2.0 * rb_cov   # bar length in Y
+
+            # X-direction bars
+            y_inner_start = pier_y - plc_w/2 + rb_cov + bar_r
+            y_inner_end   = pier_y + plc_w/2 - rb_cov - bar_r
+            ny = max(2, int((y_inner_end - y_inner_start) / rb_sp_l) + 1)
+            for j in range(ny):
+                pile_cap_rebar_items.append(ExtractedObject(
+                    "SubstructureRebar",
+                    ifc_name        = f"PileCap_XBar_{pier_id}{j+1}",
+                    component_role  = "Pile Cap X-Rebar",
+                    material        = "Steel",
+                    steel_grade     = "Fe415",
+                    x_center        = pier_x,
+                    y_center        = y_inner_start + j*(y_inner_end-y_inner_start)/max(1,ny-1),
+                    z_center        = pile_cap_z_top - plc_d/2,
+                    diameter        = rb_d,
+                    length_mm       = bar_lx,
+                    length_m        = bar_lx / 1000.0,
+                    volume_m3       = math.pi * (rb_d/2/1000)**2 * (bar_lx/1000),
+                ))
+
+            # Y-direction bars
+            x_inner_start = pier_x - plc_l/2 + rb_cov + bar_r
+            x_inner_end   = pier_x + plc_l/2 - rb_cov - bar_r
+            nx = max(2, int((x_inner_end - x_inner_start) / rb_sp_l) + 1)
+            for i in range(nx):
+                pile_cap_rebar_items.append(ExtractedObject(
+                    "SubstructureRebar",
+                    ifc_name        = f"PileCap_YBar_{pier_id}{i+1}",
+                    component_role  = "Pile Cap Y-Rebar",
+                    material        = "Steel",
+                    steel_grade     = "Fe415",
+                    x_center        = x_inner_start + i*(x_inner_end-x_inner_start)/max(1,nx-1),
+                    y_center        = pier_y,
+                    z_center        = pile_cap_z_top - plc_d/2 - bar_r,
+                    diameter        = rb_d,
+                    length_mm       = bar_ly,
+                    length_m        = bar_ly / 1000.0,
+                    volume_m3       = math.pi * (rb_d/2/1000)**2 * (bar_ly/1000),
+                ))
+
+        return {
+            "pier_cap":       pier_cap_items,
+            "pier":           pier_items,
+            "pile_cap":       pile_cap_items,
+            "piles":          pile_items,
+            "rebar_long":     rebar_long_items,
+            "rebar_trans":    hoop_items,
+            "pile_cap_rebar": pile_cap_rebar_items,
+        }
+
 
     def _solve_girder_layout(self, total_width):
         """

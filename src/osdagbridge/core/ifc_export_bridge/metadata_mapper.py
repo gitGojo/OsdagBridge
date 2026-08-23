@@ -277,3 +277,86 @@ class BridgeMetadataMapper:
             
         if props:
             self.assign_metadata(element, props)
+
+    def map_substructure_component(self, element, item):
+        """
+        Attach Pset_OsdagSubstructureProperties, IfcElementQuantity (BOQ),
+        and IfcMaterial to a new substructure IFC element.
+
+        IfcElementQuantity follows buildingSMART Qto schemas:
+          - Concrete: Qto_ConcreteElementBaseQuantities  → IfcQuantityVolume
+          - Rebar:    Qto_ReinforcingElementBaseQuantities → IfcQuantityLength + IfcQuantityCount
+        IfcMaterial is linked via IfcRelAssociatesMaterial (required by Revit for BOQ).
+        """
+        owner_history = getattr(self.mapper, '_owner_history', None)
+        is_rebar = getattr(item, 'material', '') == 'Steel'
+
+        # ── 1. IfcPropertySet  (Pset_OsdagSubstructureProperties) ────────────
+        pset_props = {
+            "ComponentRole":  getattr(item, 'component_role',  getattr(item, 'ifc_name', '')),
+            "ConcreteGrade":  getattr(item, 'concrete_grade',  'M30'),
+            "SteelGrade":     getattr(item, 'steel_grade',     'Fe415') if is_rebar else None,
+            "Diameter_m":     (getattr(item, 'diameter', None) or 0) / 1000.0 or None,
+            "Height_m":       (getattr(item, 'height', None) or 0) / 1000.0 or None,
+            "Length_m":       getattr(item, 'length_m', None),
+            "Volume_m3":      getattr(item, 'volume_m3', None),
+        }
+        self.assign_metadata(element, pset_props, "Pset_OsdagSubstructureProperties")
+
+        # ── 2. IfcElementQuantity  (BOQ quantities) ──────────────────────────
+        qty_items = []
+        vol = getattr(item, 'volume_m3', None)
+        length_m = getattr(item, 'length_m', None)
+
+        try:
+            if not is_rebar and vol is not None:
+                qty_items.append(
+                    self.file.createIfcQuantityVolume("Volume", None, None, float(vol))
+                )
+            if is_rebar and length_m is not None:
+                qty_items.append(
+                    self.file.createIfcQuantityLength("Length", None, None, float(length_m))
+                )
+                qty_items.append(
+                    self.file.createIfcQuantityCount("Count", None, None, 1)
+                )
+
+            if qty_items:
+                qto_name = ("Qto_ReinforcingElementBaseQuantities"
+                            if is_rebar else
+                            "Qto_ConcreteElementBaseQuantities")
+                qty_set = self.file.createIfcElementQuantity(
+                    create_ifc_guid(),
+                    owner_history,
+                    qto_name,
+                    None,
+                    None,
+                    qty_items
+                )
+                self.file.createIfcRelDefinesByProperties(
+                    create_ifc_guid(),
+                    owner_history,
+                    None, None,
+                    [element],
+                    qty_set
+                )
+        except Exception as e:
+            print(f"[WARN] IfcElementQuantity creation failed for {getattr(item,'ifc_name','?')}: {e}")
+
+        # ── 3. IfcMaterial + IfcRelAssociatesMaterial  (for Revit BOQ) ───────
+        try:
+            if is_rebar:
+                mat_name = getattr(item, 'steel_grade', 'Fe415')
+            else:
+                mat_name = f"Concrete {getattr(item, 'concrete_grade', 'M30')}"
+            mat = self.mapper.define_material(mat_name)
+            self.file.createIfcRelAssociatesMaterial(
+                create_ifc_guid(),
+                owner_history,
+                None, None,
+                [element],
+                mat
+            )
+        except Exception as e:
+            print(f"[WARN] IfcRelAssociatesMaterial failed for {getattr(item,'ifc_name','?')}: {e}")
+
