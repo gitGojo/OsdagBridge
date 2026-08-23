@@ -135,13 +135,7 @@ defect classes that full end-to-end testing alone can miss.
 
 ---
 
-## Report
 
-See `Substructure_Integration_Report.md` (or the submitted PDF) for full methodology, IFC
-integration details, and a documented account of the debugging process and defect classes
-encountered while building this out.
-
----
 
 ## Acknowledgments
 
