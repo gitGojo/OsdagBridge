@@ -630,6 +630,9 @@ class BridgeIfcGenerator:
             pos2d = self.mapper.create_axis2placement_2d((0., 0.))
             return self.file.createIfcCircleProfileDef("AREA", name, pos2d, (diameter_mm * s) / 2.0)
 
+        CONCRETE_COLOR = (0.7, 0.7, 0.7)
+        REBAR_COLOR = (0.6, 0.2, 0.1)
+
         def _process_pier(item):
             """IfcColumn for circular RC pier."""
             height_m  = item.height * s
@@ -779,7 +782,6 @@ class BridgeIfcGenerator:
                 create_ifc_guid(), self._owner_history,
                 Name=item.ifc_name,
                 NominalDiameter=item.diameter * s,
-                SteelGrade=getattr(item, 'steel_grade', 'Fe415'),
                 ObjectPlacement=self.file.createIfcLocalPlacement(self.storey.ObjectPlacement, place),
                 Representation=prod_def,
             )
