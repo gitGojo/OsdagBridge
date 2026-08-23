@@ -1,175 +1,150 @@
-# OsdagBridge
+# OsdagBridge — Substructure Modeling & IFC Integration
 
-OsdagBridge is a modular, shared-core software plugin for the analysis and design of steel bridges within the Osdag ecosystem.  
-It supports desktop (PySide6), web (Django + React), and CLI interfaces through a unified Python core.
-
-The system currently supports:
-- Plate Girder Bridges  
- 
-
-Additional bridge types can be added through the plugin architecture.
+> Screening task submission: parametric 3D CAD modeling of bridge substructure (piles, pile
+> cap, pier, pier cap, and internal reinforcement) using `pythonOCC`, integrated into the
+> existing OsdagBridge superstructure workflow and IFC export pipeline.
 
 ---
 
-## Key Features
+## Overview
 
-### Shared Core Architecture
-All numerical logic and I/O are implemented once in `osdagbridge.core`.  
-The desktop GUI, web app, and CLI all reuse the same core for consistent behavior.
+OsdagBridge already models the bridge **superstructure** — deck, plate girders, cross bracing,
+crash barriers. This contribution adds the **substructure**: the load path from the girder
+bearings down to the ground, plus its internal reinforcement, fully parametric and wired into
+the same visualization and IFC export pipeline the superstructure already uses.
 
-### Modular Bridge-Type System
-Each bridge type includes:
-- DTO (input model schema)
-- Initial sizing routines
-- Structural analysis configuration
-- Design and code-check modules
-- CAD geometry generation
-- Report generation utilities
-
-### Reusable Bridge Components
-Common structural elements are defined in `bridge_components/`:
-- Girders  
-- Decks  
-- Crash barriers  
-- Pedestals  
-- Piers  
-- Foundations  
-- Piles and pile caps  
-
-Components are shared across multiple bridge types.
-
-### Multi-Solver Analysis Support
-Multiple analysis backends are supported:
-- Native lightweight FEM solver  
-- OpenSeesPy  
-- OspGrillage  
-
-Solvers are switchable at runtime via adapters.
-
-### Integrated Indian Standards
-Included under `core/utils/codes/`:
-- IRC:6–2017  
-- IRC:22–2015  
-- IRC:24–2010  
-
-These modules provide load models, combinations, material factors, and code checks.
+| Before | After |
+|---|---|
+| Girders float with no visible support | Full pier → pier cap → pile cap → pile stack |
+| Substructure `.ifc` export unsupported | Full bridge (super + sub) exports as one `.ifc` |
+| No reinforcement modeling | Solid 3D rebar (not wireframe) in pier + pile cap |
 
 ---
 
-## Project Structure
+## What's included
 
 ```
-OsdagBridge/
-├── docs/
-├── examples/
-├── tests/
-└── src/
-    └── osdagbridge/
-        ├── core/              # Analysis, design, IO, solvers, codes
-        ├── bridge_types/      # Plate girder, box girder, truss
-        ├── bridge_components/ # Reusable components
-        ├── cli/               # Command-line interface
-        ├── desktop/           # PySide6 GUI
-        └── web/               # Django + React web stack
+core/
+├── pile/
+│   └── builder.py       # 4x circular piles, 2x2 grid, parametric spacing/diameter
+├── pile_cap/
+│   └── builder.py       # Rectangular RC slab + 2-way rebar mesh
+├── pier/
+│   └── builder.py       # Circular RC column + longitudinal bars + tie rings
+└── pier_cap/
+    └── builder.py       # Trapezoidal hammerhead cap, spans transverse deck width
 ```
+
+Wiring additions:
+- `cad_generator.py` — `generate_substructure()` calls all four builders per support location,
+  computes stacked elevations automatically, and merges output into the existing CAD data
+  dictionary.
+- `cad_3d.py` — `display_substructure()` applies concrete/rebar materials and wires the
+  "Substructure" UI toggle independently of existing superstructure toggles.
+- IFC wrapper — substructure shapes mapped to `IfcColumn` / `IfcBeam` / `IfcFooting` /
+  `IfcReinforcingBar` with correct spatial placement relative to the existing global origin.
 
 ---
 
-## Installation
+## Coordinate system
 
-Clone the repository:
+Matches the existing superstructure convention exactly, so substructure and superstructure
+share one consistent frame:
 
-```bash
-git clone https://github.com/osdag-admin/OsdagBridge.git
-cd OsdagBridge
+```
+X-axis → Longitudinal (span direction)
+Y-axis → Transverse (deck width direction)
+Z-axis → Vertical
+Origin → Center of span, at deck/bearing level
 ```
 
-Install in editable mode:
-
-```bash
-pip install -e .
-```
+Each component is placed relative to the elevation of the component beneath it (piles → pile
+cap → pier → pier cap), so the full stack is always flush and gap-free regardless of parameter
+changes.
 
 ---
 
-## Usage
+## Parameters (all mm, all adjustable)
 
-### Command-Line Interface
+| Pier | | Pier Cap | | Pile Cap | | Piles | | Rebar | |
+|---|---|---|---|---|---|---|---|---|---|
+| diameter | 800 | top width | 3000 | length | 2200 | count | 4 (2×2) | main dia | 16 |
+| height | 3000 | bottom width | 1200 | width | 1200 | diameter | 400 | main spacing | 150 |
+| | | depth | 600 | depth | 600 | length | 5000 | tie dia | 8 |
+| | | length | = deck width | | | spacing | 600 | tie spacing | 200 |
+| | | | | | | | | cover | 40 |
 
-Run an analysis:
+`pier_cap_length` is dynamically derived from the live deck-width input — it is not a fixed
+default in practice.
+
+---
+
+## Visuals
+
+- **Concrete** (pier, pier cap, pile cap): light gray, semi-transparent (opacity 0.35)
+- **Reinforcement**: opaque steel gray, visible through the concrete
+- Both render in shaded mode (not wireframe) for a realistic BIM-style preview
+
+---
+
+## Running it
 
 ```bash
-osdagbridge analyze project.yaml --solver native
-```
-
-Generate a report:
-
-```bash
-osdagbridge report project.yaml report.pdf
-```
-
-### Desktop Application
-
-```bash
+conda activate osdagbridge-env
+cd osdagbridge/src
 python -m osdagbridge.desktop
 ```
 
-### Web Application
+In the app: enter span/carriageway inputs → **Design** → check **Substructure** (independent
+of the **Bridge** toggle, both can be active together) → rotate to isometric view.
 
-Backend:
-
-```bash
-python src/osdagbridge/web/backend/manage.py runserver
-```
-
-Frontend:
-
-```bash
-cd src/osdagbridge/web/frontend
-npm install
-npm start
-```
+To export the full model (super + substructure) to IFC:
+**File → Save 3D CAD Model → Save as type: .ifc**
 
 ---
 
 ## Testing
 
-Run the complete test suite:
+Each builder is independently testable outside the full app:
 
 ```bash
-pytest -q
+python -c "
+from core.pier.builder import build_pier
+from OCC.Core.Bnd import Bnd_Box
+from OCC.Core.BRepBndLib import brepbndlib_Add
+
+result = build_pier()
+box = Bnd_Box()
+brepbndlib_Add(result['pier_concrete'][0], box)
+print(box.Get())
+"
 ```
 
-Continuous integration runs automatically through GitHub Actions (`.github/workflows/ci.yml`).
+This bounding-box-first testing approach was essential during development — see the
+**Challenges** section of the accompanying report for why isolated component testing catches
+defect classes that full end-to-end testing alone can miss.
 
 ---
 
-## Development Guidelines
+## Known limitations / future work
 
-### Key Code Locations
-- Core logic: `src/osdagbridge/core/`
-- Codes & standards: `src/osdagbridge/core/utils/codes/`
-- Bridge types: `src/osdagbridge/bridge_types/`
-- Components: `src/osdagbridge/bridge_components/`
-- CLI: `src/osdagbridge/cli/`
-- Desktop GUI: `src/osdagbridge/desktop/`
-- Web backend/frontend: `src/osdagbridge/web/`
-
-### Contribution Workflow
-1. Fork the repository  
-2. Create a feature branch  
-3. Ensure all tests pass (`pytest`)  
-4. Submit a pull request
+- Reinforcement is fully modeled for **pier** and **pile cap**; pier cap and pile reinforcement
+  are deferred (lower priority — not clearly visible in the reference outcome images).
+- Pile arrangement is fixed at a 2×2 grid; configurable count/pattern is a natural next step.
+- IFC export has been validated against one BIM viewer; broader tool coverage is future work.
 
 ---
 
-## Acknowledgements
+## Report
 
-OsdagBridge is part of the Osdag project, promoting open-source tools for steel design education, research, and practice.
+See `Substructure_Integration_Report.md` (or the submitted PDF) for full methodology, IFC
+integration details, and a documented account of the debugging process and defect classes
+encountered while building this out.
 
 ---
 
-## License
+## Acknowledgments
 
-This project is licensed under the MIT License.  
-See the `LICENSE` file for full details.
+Built on top of the existing OsdagBridge (FOSSEE / IIT Bombay) architecture. Superstructure
+modules (girder, deck, cross bracing) were used as the reference pattern for how substructure
+builders should structure their return values and integrate with the display pipeline.
